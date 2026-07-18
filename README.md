@@ -1,4 +1,4 @@
-# CustomComic v9.1
+# CustomComic v9.2
 
 ## 新增
 - 全新貓娘看漫畫 App Icon
@@ -30,3 +30,11 @@
 - 背景影片改成從系統相簿選取
 - 網站下載時沿用內建瀏覽器的 Cookie、Referer 與 User-Agent
 - 提高會員網站直接檔案下載成功率
+
+
+## v9.2 編譯修正
+- AppearanceManager 改用 Published 與 UserDefaults
+- 移除可能造成大量泛型錯誤的自訂 MovieTransferable
+- 背景影片改用 PhotosPickerItem Data 匯入
+- 隱藏書庫搜尋改用 iOS 16 相容寫法
+- Info.plist 加入相簿存取用途說明
