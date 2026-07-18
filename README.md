@@ -1,50 +1,32 @@
-# 自訂漫畫庫－Codemagic 雲端 IPA 版
+# CustomComic v9.1
 
-本版本沒有任何隱藏資料夾或隱藏檔案。
+## 新增
+- 全新貓娘看漫畫 App Icon
+- 首頁上方切換「本地漫畫／網頁」
+- 左上角設定
+- 自訂純色、圖片或循環影片背景
+- 背景透明度、模糊與影片音量
+- 背景圖片與作品封面從相簿挑選
+- 未選封面時固定使用 ZIP 第一張圖片
+- 使用者自行新增網站
+- 內建瀏覽器保留網站 Cookie 與登入狀態
+- 背景下載管理
+- App 切到背景或鎖定畫面時，系統可繼續 URLSession 背景下載
+- 下載進度、取消、失敗原因與完成通知
+- 目前支援直接 ZIP、CBZ、圖片或檔案網址下載
 
-根目錄可直接看到：
-
-- codemagic.yaml
-- project.yml
-- CustomComic/
-- README.md
-
-## 使用方法
-
-1. 將本壓縮檔解壓。
-2. 把所有內容上傳到 GitHub repository。
-3. 到 Codemagic 登入並連接該 GitHub repository。
-4. Codemagic 會讀取根目錄的 `codemagic.yaml`。
-5. 選擇 `Build CustomComic unsigned IPA` 並開始編譯。
-6. 完成後在 Artifacts 下載 `CustomComic-unsigned.ipa`。
-7. 用 SideStore、AltStore 或其他簽名工具簽名安裝。
-
-注意：
-- 這是未簽名 IPA。
-- 不需要把 Apple 帳號或憑證放進專案。
-- 圖片匯入後會保存在 App 內，可離線閱讀。
+## 限制
+- 網站若使用 DRM、Canvas、分塊圖片、短效權杖或禁止下載，可能只能在內建瀏覽器閱讀。
+- 使用者從多工畫面強制關閉 App 後，iOS 不保證背景任務繼續。
+- 自動分析整章圖片與下載後自動匯入漫畫庫，會在後續版本繼續完成。
 
 
-## v3 修正
-- 移除只支援 iOS 17 的 `ContentUnavailableView`
-- 改用自製空白書庫畫面
-- 保持最低支援 iOS 16
-
-
-## v4 修正
-- `ComicLibrary.swift` 加入 `import Combine`
-- 修正 `ObservableObject` 與 `@Published` 無法編譯
-
-
-## v5 更新
-- 已加入正式 App 圖標
-- 圖標位置：`CustomComic/Assets.xcassets/AppIcon.appiconset`
-- XcodeGen 已設定 `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`
-
-
-## v6 更新
-- 匯入方式由資料夾改為 ZIP
-- ZIP 可包含多層子資料夾
-- 自動找出 JPEG、PNG、WebP 等圖片
-- 未自訂封面時，隨機選一張漫畫圖片當封面
-- 加入 ZIPFoundation Swift Package
+## v9.1 修正
+- 修復 iPad 橫向只有少量作品時，漫畫卡片被拉寬、文字錯位
+- 普通書庫與隱藏書庫統一使用固定比例漫畫卡
+- 隱藏書庫增加完整尺寸、搜尋與長按管理
+- Face ID 每次打開隱藏書庫只會自動驗證一次
+- 點進漫畫、返回列表或打開長按選單不再重複驗證
+- 背景影片改成從系統相簿選取
+- 網站下載時沿用內建瀏覽器的 Cookie、Referer 與 User-Agent
+- 提高會員網站直接檔案下載成功率
