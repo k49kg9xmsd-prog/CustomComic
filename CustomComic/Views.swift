@@ -9,11 +9,20 @@ struct LibraryView: View {
         NavigationStack {
             Group {
                 if library.books.isEmpty {
-                    ContentUnavailableView(
-                        "還沒有內容",
-                        systemImage: "books.vertical",
-                        description: Text("按右上角新增，選擇含有圖片的資料夾。")
-                    )
+                    VStack(spacing: 14) {
+                        Image(systemName: "books.vertical")
+                            .font(.system(size: 54))
+                            .foregroundStyle(.secondary)
+
+                        Text("還沒有內容")
+                            .font(.title2.bold())
+
+                        Text("按右上角新增，選擇含有圖片的資料夾。")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(32)
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 22) {
