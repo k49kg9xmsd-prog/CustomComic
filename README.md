@@ -107,3 +107,10 @@
 - 已看／觀看中／未看狀態
 - 播放器鎖定
 - 長按漫畫匯出 ZIP、動畫匯出原影片
+
+## 線上動畫規則引擎
+
+線上動畫改為規則驅動：規則負責描述搜尋結果、作品頁、集數與播放網址的位置，App 負責請求、解析及播放。規則可由線上動畫頁匯入 JSON，專案不內建第三方內容來源。
+
+規則可為單一物件或物件陣列，主要欄位：`name`、`baseURL`、`searchURL`、`resultPattern`、`titleGroup`、`detailURLGroup`、`coverURLGroup`、`episodePattern`、`episodeTitleGroup`、`episodeURLGroup`、`videoPattern`、`videoURLGroup`。`searchURL` 使用 `@keyword` 作為搜尋關鍵字佔位符；Pattern 使用正規表示式，Group 欄位指定擷取群組編號。
+
