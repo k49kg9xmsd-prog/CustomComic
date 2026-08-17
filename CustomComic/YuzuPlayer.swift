@@ -1,0 +1,666 @@
+import SwiftUI
+import AVFoundation
+import UIKit
+import MediaPlayer
+import AVKit
+
+struct PlayerLayerView: UIViewControllerRepresentable {
+    let player: AVPlayer
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.showsPlaybackControls = false
+        controller.videoGravity = .resizeAspect
+        controller.allowsPictureInPicturePlayback = true
+        controller.canStartPictureInPictureAutomaticallyFromInline = true
+        return controller
+    }
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) { controller.player = player }
+}
+
+final class SystemVolumeController {
+    static let shared = SystemVolumeController()
+    private weak var slider: UISlider?
+
+    var volume: Float { AVAudioSession.sharedInstance().outputVolume }
+
+    func attach(slider: UISlider) {
+        self.slider = slider
+    }
+
+    func setVolume(_ value: Float) {
+        let clamped = min(max(value, 0), 1)
+        DispatchQueue.main.async { [weak self] in
+            self?.slider?.setValue(clamped, animated: false)
+            self?.slider?.sendActions(for: .valueChanged)
+        }
+    }
+}
+
+struct SystemVolumeBridgeView: UIViewRepresentable {
+    func makeUIView(context: Context) -> MPVolumeView {
+        let volumeView = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        volumeView.showsRouteButton = false
+        volumeView.showsVolumeSlider = true
+        volumeView.alpha = 0.001
+        if let slider = volumeView.subviews.compactMap({ $0 as? UISlider }).first {
+            SystemVolumeController.shared.attach(slider: slider)
+        }
+        return volumeView
+    }
+
+    func updateUIView(_ uiView: MPVolumeView, context: Context) {}
+}
+
+struct YuzuPlayerScreen: View {
+    @EnvironmentObject private var videoLibrary: VideoLibrary
+    @EnvironmentObject private var settings: PlayerSettings
+    @Environment(\.dismiss) private var dismiss
+
+    let itemID: UUID
+    @State private var activeItemID: UUID?
+
+    @State private var player = AVPlayer()
+    @State private var timeObserver: Any?
+    @State private var endObserver: NSObjectProtocol?
+    @State private var hasPrepared = false
+    @State private var isPlaying = false
+    @State private var controlsVisible = true
+    @State private var currentTime: Double = 0
+    @State private var duration: Double = 0
+    @State private var playbackRate: Float = 1
+    @State private var wasPlayingBeforeSeek = false
+
+    @State private var isSeeking = false
+    @State private var seekPreview: Double = 0
+    @State private var gestureMode: GestureMode?
+    @State private var gestureStartValue: Double = 0
+    @State private var hud: PlayerHUD?
+    @State private var hideWorkItem: DispatchWorkItem?
+    @State private var hudWorkItem: DispatchWorkItem?
+    @State private var restartWorkItem: DispatchWorkItem?
+    @State private var showRestart = false
+    @State private var longPressActive = false
+    @State private var showPlaybackSettings = false
+    @State private var isLocked = false
+    @State private var autoNextCountdown: Int?
+    @State private var autoNextWorkItem: DispatchWorkItem?
+    @State private var previewImage: UIImage?
+
+    private var item: VideoItem? { videoLibrary.videos.first { $0.id == (activeItemID ?? itemID) } }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            SystemVolumeBridgeView()
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
+            if let item {
+                PlayerLayerView(player: player).ignoresSafeArea()
+                gestureSurface
+
+                if controlsVisible && !isLocked {
+                    controls(for: item).transition(.opacity)
+                }
+                if isLocked {
+                    VStack {
+                        Spacer()
+                        Button { isLocked = false; controlsVisible = true; scheduleHide() } label: {
+                            Label("長按 2 秒解鎖", systemImage: "lock.fill")
+                                .padding(.horizontal, 18).padding(.vertical, 12)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+                        .onLongPressGesture(minimumDuration: 2) { isLocked = false; controlsVisible = true; scheduleHide() }
+                        .padding(.bottom, 36)
+                    }.foregroundStyle(.white).zIndex(8)
+                }
+                if let count = autoNextCountdown {
+                    VStack { Spacer(); HStack { Spacer();
+                        VStack(spacing: 10) {
+                            Text("\(count) 秒後播放下一集").font(.headline)
+                            Button("取消") { cancelAutoNext() }
+                        }.padding(18).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                    }.padding(24) }.foregroundStyle(.white).zIndex(9)
+                }
+
+                if showRestart {
+                    restartButton
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                        .zIndex(4)
+                }
+
+                if let hud {
+                    hudView(hud).transition(.scale.combined(with: .opacity)).zIndex(5)
+                }
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle").font(.largeTitle)
+                    Text("找不到影片").font(.headline)
+                }.foregroundStyle(.white)
+            }
+        }
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+        .sheet(isPresented: $showPlaybackSettings) {
+            NavigationStack {
+                PlayerSettingsView()
+                    .environmentObject(settings)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("完成") { showPlaybackSettings = false }
+                        }
+                    }
+            }
+        }
+        .onAppear { activeItemID = itemID; if let item { prepare(item) } }
+        .onDisappear {
+            if let item { saveProgress(item) }
+            cleanup()
+        }
+    }
+
+    private var gestureSurface: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !isLocked, settings.gesturesEnabled, settings.singleTapEnabled else { return }
+                    withAnimation(.easeOut(duration: 0.18)) { controlsVisible.toggle() }
+                    controlsVisible ? scheduleHide() : cancelHide()
+                }
+                .simultaneousGesture(
+                    SpatialTapGesture(count: 2)
+                        .onEnded { value in
+                            guard settings.gesturesEnabled, settings.centerDoubleTapEnabled else { return }
+                            let third = proxy.size.width / 3
+                            guard value.location.x >= third, value.location.x <= third * 2 else { return }
+                            togglePlayback(showHUD: true)
+                        }
+                )
+                .gesture(
+                    DragGesture(minimumDistance: 12)
+                        .onChanged { handleDragChanged($0, size: proxy.size) }
+                        .onEnded { handleDragEnded($0, size: proxy.size) }
+                )
+                .onLongPressGesture(
+                    minimumDuration: 2.0,
+                    maximumDistance: 12,
+                    pressing: { pressing in
+                        guard settings.gesturesEnabled, settings.longPressSpeedEnabled else { return }
+                        if !pressing && longPressActive {
+                            endTemporaryDoubleSpeed()
+                        }
+                    },
+                    perform: {
+                        guard settings.gesturesEnabled, settings.longPressSpeedEnabled else { return }
+                        guard isPlaying, gestureMode == nil, !isSeeking else { return }
+                        longPressActive = true
+                        player.rate = 2
+                        showHUD(.speed(2))
+                    }
+                )
+        }.ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private func controls(for item: VideoItem) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Button {
+                    saveProgress(item)
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 20, weight: .bold))
+                        .frame(width: 44, height: 44)
+                        .background(Color.black.opacity(settings.buttonOpacity), in: Circle())
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title).font(.headline).lineLimit(1)
+                    Text(item.category).font(.caption).opacity(0.72)
+                }
+                Spacer()
+
+                Button { isLocked = true; controlsVisible = false; cancelHide() } label: {
+                    Image(systemName: "lock")
+                        .font(.system(size: 18, weight: .bold))
+                        .frame(width: 44, height: 44)
+                        .background(Color.black.opacity(settings.buttonOpacity), in: Circle())
+                }
+
+                Button {
+                    cancelHide()
+                    showPlaybackSettings = true
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 20, weight: .bold))
+                        .frame(width: 44, height: 44)
+                        .background(Color.black.opacity(settings.buttonOpacity), in: Circle())
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 8)
+            .padding(.bottom, 10)
+            .foregroundStyle(Color(hex: settings.textHex))
+            .background(.ultraThinMaterial)
+            .background(Color(hex: settings.topBarHex).opacity(settings.topBarOpacity))
+
+            Spacer()
+
+            HStack(spacing: 34) {
+                Button { playAdjacent(offset: -1) } label: { Image(systemName: "backward.end.fill").font(.title) }
+                    .disabled(adjacentItem(offset: -1) == nil).opacity(adjacentItem(offset: -1) == nil ? 0.25 : 1)
+                Button { togglePlayback(showHUD: false) } label: {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 38, weight: .semibold))
+                        .foregroundStyle(Color(hex: settings.playButtonHex))
+                        .frame(width: 86, height: 86)
+                        .background(Color.black.opacity(settings.buttonOpacity), in: Circle())
+                        .overlay(Circle().stroke(Color.white.opacity(0.16), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.35), radius: 15)
+                }.buttonStyle(.plain)
+                Button { playAdjacent(offset: 1) } label: { Image(systemName: "forward.end.fill").font(.title) }
+                    .disabled(adjacentItem(offset: 1) == nil).opacity(adjacentItem(offset: 1) == nil ? 0.25 : 1)
+            }.foregroundStyle(Color(hex: settings.textHex))
+
+            Spacer()
+
+            VStack(spacing: 10) {
+                if isSeeking, let previewImage {
+                    Image(uiImage: previewImage).resizable().scaledToFit()
+                        .frame(width: 180, height: 102).clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(Text(VideoItem.timeText(seekPreview)).font(.caption.bold()).padding(5).background(.black.opacity(0.65), in: Capsule()).padding(6), alignment: .bottomTrailing)
+                }
+                PlayerProgressBar(
+                    value: isSeeking ? seekPreview : currentTime,
+                    duration: duration,
+                    played: Color(hex: settings.playedTrackHex),
+                    unplayed: Color(hex: settings.unplayedTrackHex),
+                    thumb: Color(hex: settings.thumbHex),
+                    onEditingChanged: { editing, value in
+                        if editing {
+                            if !isSeeking { wasPlayingBeforeSeek = isPlaying }
+                            isSeeking = true
+                            seekPreview = value
+                            generatePreview(at: value)
+                            showHUD(.seek(value, duration))
+                            cancelHide()
+                        } else {
+                            seek(to: value)
+                            isSeeking = false
+                            if !wasPlayingBeforeSeek { player.pause(); isPlaying = false }
+                            scheduleHide()
+                        }
+                    }
+                )
+
+                HStack {
+                    Text(VideoItem.timeText(isSeeking ? seekPreview : currentTime))
+                    Text("/")
+                    Text(VideoItem.timeText(duration))
+                    Spacer()
+                    Text(isPlaying ? "播放中" : "已暫停")
+                        .foregroundStyle(Color(hex: settings.textHex).opacity(0.65))
+                }.font(.caption.monospacedDigit())
+            }
+            .foregroundStyle(Color(hex: settings.textHex))
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 18)
+            .background(.ultraThinMaterial)
+            .background(Color(hex: settings.bottomBarHex).opacity(settings.bottomBarOpacity))
+        }
+    }
+
+    private var restartButton: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Button {
+                    let shouldResume = isPlaying
+                    seek(to: 0)
+                    if shouldResume { player.play(); player.rate = playbackRate } else { player.pause() }
+                    withAnimation { showRestart = false }
+                    restartWorkItem?.cancel()
+                } label: {
+                    Label("從頭播放", systemImage: "arrow.counterclockwise")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(Color.black)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color(hex: settings.restartHex), in: Capsule())
+                        .shadow(color: .black.opacity(0.35), radius: 8)
+                }
+                Spacer()
+            }
+            .padding(.leading, 20)
+            .padding(.bottom, 86)
+        }
+    }
+
+    private func speedButton(_ rate: Float) -> some View {
+        Button {
+            playbackRate = rate
+            settings.remember(speed: rate, for: activeItemID ?? itemID)
+            if isPlaying { player.rate = rate }
+            showHUD(.speed(rate))
+            scheduleHide()
+        } label: {
+            playbackRate == rate ? AnyView(Label(speedLabel(rate), systemImage: "checkmark")) : AnyView(Text(speedLabel(rate)))
+        }
+    }
+
+    private func hudView(_ hud: PlayerHUD) -> some View {
+        VStack(spacing: 10) {
+            Image(systemName: hud.icon).font(.system(size: 34, weight: .semibold))
+            Text(hud.text).font(.headline.monospacedDigit())
+            if let progress = hud.progress {
+                ProgressView(value: progress)
+                    .tint(Color(hex: settings.hudTextHex))
+                    .frame(width: 130)
+            }
+        }
+        .foregroundStyle(Color(hex: settings.hudTextHex))
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+        .background(.ultraThinMaterial)
+        .background(Color(hex: settings.hudBackgroundHex).opacity(settings.hudOpacity), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func prepare(_ item: VideoItem) {
+        guard !hasPrepared else { return }
+        hasPrepared = true
+        configureAudioSession()
+        playbackRate = settings.speed(for: item.id)
+
+        let playerItem = AVPlayerItem(url: videoLibrary.videoURL(for: item))
+        player.replaceCurrentItem(with: playerItem)
+        player.isMuted = false
+        player.volume = 1
+
+        if item.lastPosition > 10 {
+            player.seek(to: CMTime(seconds: item.lastPosition, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            currentTime = item.lastPosition
+            showRestartPrompt()
+        }
+
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { _ in
+            let seconds = player.currentTime().seconds
+            if seconds.isFinite, !isSeeking { currentTime = seconds }
+            let itemDuration = player.currentItem?.duration.seconds ?? 0
+            if itemDuration.isFinite, itemDuration > 0 { duration = itemDuration }
+            isPlaying = player.timeControlStatus == .playing
+        }
+
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: playerItem, queue: .main) { _ in
+            isPlaying = false
+            currentTime = duration
+            videoLibrary.updateProgress(item, position: duration, duration: duration)
+            withAnimation { controlsVisible = true }
+            cancelHide()
+            if settings.autoNextEpisode, adjacentItem(offset: 1) != nil { startAutoNext() }
+        }
+
+        player.play()
+        player.rate = playbackRate
+        isPlaying = true
+        scheduleHide()
+    }
+
+    private func configureAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [])
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch { print("YuzuPlayer Audio Session 設定失敗: \(error.localizedDescription)") }
+    }
+
+    private func togglePlayback(showHUD: Bool) {
+        if player.timeControlStatus == .playing {
+            player.pause(); isPlaying = false
+            if showHUD { self.showHUD(.paused) }
+            withAnimation { controlsVisible = true }
+            cancelHide()
+        } else {
+            if duration > 0, currentTime >= duration - 0.2 { seek(to: 0) }
+            player.play(); player.rate = playbackRate; isPlaying = true
+            if showHUD { self.showHUD(.playing) }
+            scheduleHide()
+        }
+    }
+
+
+    private func handleDragChanged(_ value: DragGesture.Value, size: CGSize) {
+        guard !isLocked, settings.gesturesEnabled else { return }
+        if longPressActive { endTemporaryDoubleSpeed() }
+        cancelHide()
+        let dx = value.translation.width, dy = value.translation.height
+
+        if gestureMode == nil {
+            guard max(abs(dx), abs(dy)) > 14 else { return }
+            if abs(dx) > abs(dy) * 1.15 {
+                guard settings.seekGestureEnabled else { return }
+                gestureMode = .seek
+                gestureStartValue = currentTime
+                seekPreview = currentTime
+                isSeeking = true
+                wasPlayingBeforeSeek = isPlaying
+            } else if value.startLocation.x < size.width / 2 {
+                guard settings.brightnessGestureEnabled else { return }
+                gestureMode = .brightness
+                gestureStartValue = Double(UIScreen.main.brightness)
+            } else {
+                guard settings.volumeGestureEnabled else { return }
+                gestureMode = .volume
+                gestureStartValue = Double(SystemVolumeController.shared.volume)
+            }
+        }
+
+        switch gestureMode {
+        case .seek:
+            let secondsPerWidth = max(duration / 2.5, 60) / max(size.width, 1)
+            seekPreview = min(max(gestureStartValue + Double(dx) * secondsPerWidth, 0), max(duration, 0))
+            generatePreview(at: seekPreview)
+            showHUD(.seek(seekPreview, duration))
+        case .brightness:
+            let newValue = min(max(gestureStartValue - Double(dy / max(size.height, 1)), 0), 1)
+            UIScreen.main.brightness = CGFloat(newValue)
+            showHUD(.brightness(newValue))
+        case .volume:
+            let newValue = min(max(gestureStartValue - Double(dy / max(size.height, 1)), 0), 1)
+            SystemVolumeController.shared.setVolume(Float(newValue))
+            showHUD(.volume(newValue))
+        case .none: break
+        }
+    }
+
+    private func handleDragEnded(_ value: DragGesture.Value, size: CGSize) {
+        if gestureMode == .seek {
+            seek(to: seekPreview)
+            isSeeking = false
+            if !wasPlayingBeforeSeek { player.pause(); isPlaying = false }
+        }
+        gestureMode = nil
+        scheduleHide()
+    }
+
+    private func adjacentItem(offset: Int) -> VideoItem? {
+        guard let current = item else { return nil }
+        let list = videoLibrary.orderedEpisodes(around: current)
+        guard let index = list.firstIndex(where: { $0.id == current.id }) else { return nil }
+        let target = index + offset
+        return list.indices.contains(target) ? list[target] : nil
+    }
+
+    private func playAdjacent(offset: Int) {
+        guard let next = adjacentItem(offset: offset) else { return }
+        if let current = item { saveProgress(current) }
+        cleanup()
+        hasPrepared = false
+        autoNextCountdown = nil
+        // 以同一播放器畫面切換內容
+        activeItemID = next.id
+        prepare(next)
+    }
+
+    private func startAutoNext() {
+        cancelAutoNext()
+        autoNextCountdown = 5
+        func tick(_ value: Int) {
+            guard value > 0 else { playAdjacent(offset: 1); return }
+            autoNextCountdown = value
+            let work = DispatchWorkItem { tick(value - 1) }
+            autoNextWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+        }
+        tick(5)
+    }
+
+    private func cancelAutoNext() {
+        autoNextWorkItem?.cancel(); autoNextWorkItem = nil; autoNextCountdown = nil
+    }
+
+    private func generatePreview(at seconds: Double) {
+        guard let current = item else { return }
+        let asset = AVURLAsset(url: videoLibrary.videoURL(for: current))
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 360, height: 204)
+        let time = CMTime(seconds: seconds, preferredTimescale: 600)
+        generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, image, _, _, _ in
+            guard let image else { return }
+            DispatchQueue.main.async { previewImage = UIImage(cgImage: image) }
+        }
+    }
+
+    private func endTemporaryDoubleSpeed() {
+        guard longPressActive else { return }
+        longPressActive = false
+        if isPlaying { player.rate = playbackRate }
+        showHUD(.speed(playbackRate))
+    }
+
+    private func seek(to seconds: Double) {
+        let safe = min(max(seconds, 0), max(duration, 0))
+        currentTime = safe
+        player.seek(to: CMTime(seconds: safe, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    private func saveProgress(_ original: VideoItem) {
+        let position = player.currentTime().seconds
+        let knownDuration = player.currentItem?.duration.seconds ?? original.duration
+        guard position.isFinite, knownDuration.isFinite else { return }
+        videoLibrary.updateProgress(original, position: position, duration: knownDuration)
+    }
+
+    private func cleanup() {
+        cancelHide(); hudWorkItem?.cancel(); restartWorkItem?.cancel(); autoNextWorkItem?.cancel()
+        if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver); self.endObserver = nil }
+        player.pause()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    private func scheduleHide() {
+        cancelHide()
+        guard isPlaying, !isSeeking else { return }
+        let work = DispatchWorkItem { withAnimation(.easeOut(duration: 0.25)) { controlsVisible = false } }
+        hideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+    }
+
+    private func cancelHide() { hideWorkItem?.cancel(); hideWorkItem = nil }
+
+    private func showRestartPrompt() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { showRestart = true }
+        restartWorkItem?.cancel()
+        let work = DispatchWorkItem { withAnimation(.easeOut(duration: 0.25)) { showRestart = false } }
+        restartWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+    }
+
+    private func showHUD(_ value: PlayerHUD) {
+        hudWorkItem?.cancel()
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) { hud = value }
+        let work = DispatchWorkItem {
+            withAnimation(.easeOut(duration: 0.18)) { if hud == value { hud = nil } }
+        }
+        hudWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+    }
+
+    private var speedText: String { speedLabel(playbackRate) }
+    private func speedLabel(_ rate: Float) -> String { rate == 1 ? "1x" : String(format: "%gx", rate) }
+}
+
+private struct PlayerProgressBar: View {
+    let value: Double
+    let duration: Double
+    let played: Color
+    let unplayed: Color
+    let thumb: Color
+    let onEditingChanged: (Bool, Double) -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            let fraction = duration > 0 ? min(max(value / duration, 0), 1) : 0
+            ZStack(alignment: .leading) {
+                Capsule().fill(unplayed.opacity(0.72)).frame(height: 5)
+                Capsule().fill(played).frame(width: max(proxy.size.width * fraction, 0), height: 5)
+                Circle().fill(thumb).frame(width: 15, height: 15).offset(x: max(proxy.size.width * fraction - 7.5, 0))
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        let newFraction = min(max(gesture.location.x / max(proxy.size.width, 1), 0), 1)
+                        onEditingChanged(true, newFraction * max(duration, 0))
+                    }
+                    .onEnded { gesture in
+                        let newFraction = min(max(gesture.location.x / max(proxy.size.width, 1), 0), 1)
+                        onEditingChanged(false, newFraction * max(duration, 0))
+                    }
+            )
+        }.frame(height: 20)
+    }
+}
+
+private enum GestureMode { case seek, brightness, volume }
+
+private enum PlayerHUD: Equatable {
+    case playing, paused
+    case brightness(Double), volume(Double), seek(Double, Double), speed(Float)
+
+    var icon: String {
+        switch self {
+        case .playing: return "play.fill"
+        case .paused: return "pause.fill"
+        case .brightness: return "sun.max.fill"
+        case .volume(let value): return value <= 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill"
+        case .seek: return "arrow.left.and.right"
+        case .speed: return "speedometer"
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .playing: return "播放"
+        case .paused: return "暫停"
+        case .brightness(let value): return "亮度  \(Int((value * 100).rounded()))%"
+        case .volume(let value): return "影片音量  \(Int((value * 100).rounded()))%"
+        case .seek(let value, let duration): return "\(VideoItem.timeText(value)) / \(VideoItem.timeText(duration))"
+        case .speed(let rate): return rate == 1 ? "1x" : String(format: "%gx", rate)
+        }
+    }
+
+    var progress: Double? {
+        switch self {
+        case .brightness(let value), .volume(let value): return value
+        case .seek(let value, let duration): return duration > 0 ? value / duration : 0
+        default: return nil
+        }
+    }
+}
