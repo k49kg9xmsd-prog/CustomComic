@@ -1,6 +1,6 @@
 # Robot Planner iOS — Codemagic unsigned IPA
 
-這個專案按照你提供的 Codemagic 參考包整理，不需要先建立 `.xcodeproj`。Codemagic 會先安裝 XcodeGen，根據 `project.yml` 生成 Xcode 專案，再以 `CODE_SIGNING_ALLOWED=NO` 編譯並封裝 unsigned IPA。
+這個專案維持 Codemagic + XcodeGen 的打包方式。Codemagic 會根據 `project.yml` 產生 Xcode 專案，再以 `CODE_SIGNING_ALLOWED=NO` 編譯並封裝 unsigned IPA。
 
 ## 使用方式
 1. 把整個資料夾上傳到 GitHub repository。
@@ -16,21 +16,83 @@
 - 單指拖曳賽墊空白處：平移賽墊。
 - 雙指捏合：縮放賽墊。
 - 長按點位／已放置物件：開啟管理選單。
-- 點一下下方「機器人／障礙物卡片」：選取要放置的物件，再點賽墊完成放置。
+- 點一下機器人／障礙物卡片：選取，再點賽墊放置。
 - 長按機器人／障礙物卡片：重新命名、編輯、匯出或刪除。
 - 資源列表：點一下載入，長按重新命名或刪除。
-- 物件編輯器：手指直接繪製／擦除／拖曳；點一下方向標記可輸入旋轉角度。
-- 不需要滑鼠右鍵、Ctrl＋滾輪或滑鼠滾輪旋轉。
+- 物件編輯器：手指直接繪製／擦除／拖曳；點一下方向標記可輸入角度。
+
+## iOS 插件系統
+本版已恢復真正可運作的 iOS Mod Loader，不再是只有插件管理頁面。
+
+支援：
+- 直接選擇 `.zip` 安裝插件。
+- `mod.json` 掃描與插件 ID / 版本 / 作者 / 權限顯示。
+- 插件啟用、停用、刪除、儲存後重新載入。
+- `depends`、`conflicts`、`load_after`、`load_before`。
+- `main.js` 或 `ios_entry` JavaScript 入口。
+- `pre_load`、`core_load`、`ui_load`、`app_ready` 階段。
+- CSS / JavaScript / HTML 注入。
+- 動態新增 Robot Planner 頁面。
+- Event Bus。
+- Service registry。
+- replaceGlobal / hookGlobal / patchMethod。
+- 插件自己的 JSON 資料讀寫。
+- 讀取插件內文字與圖片／其他 assets。
+- 插件錯誤回報與管理器顯示。
+- 一鍵備份已安裝插件 ZIP。
+
+### iOS 插件格式
+```text
+MyPlugin.zip
+├─ mod.json
+├─ main.js
+└─ assets/
+```
+
+最小 `mod.json`：
+```json
+{
+  "id": "example.plugin",
+  "name": "Example Plugin",
+  "version": "1.0.0",
+  "ios_entry": "main.js"
+}
+```
+
+Windows + iOS 共用 ZIP 建議：
+```text
+MyPlugin.zip
+├─ mod.json
+├─ main.py      # Windows / Python 版
+├─ main.js      # iOS 版
+└─ assets/
+```
+
+```json
+{
+  "id": "example.plugin",
+  "entry": "main.py",
+  "ios_entry": "main.js"
+}
+```
+
+只有 `main.py` 的舊插件也可以匯入保存，但管理器會標示「需要轉換」，不會假裝已經能在 iOS 執行。之後可以用獨立的插件轉換網站產生 `main.js`。
+
+## 插件測試
+專案內附：
+`TestPlugins/Hello_iOS_Plugin.zip`
+
+安裝並啟用後，如果插件系統正常，頂部導覽會多出「🧩 插件測試」頁面。
 
 ## iOS 版架構
-- 原 Robot Planner 的 HTML / CSS / JavaScript / SVG 路線規劃核心保留在 `RobotPlanner/index.html`。
-- Qt `QWebEngineView + QWebChannel` 改為 `WKWebView + WKScriptMessageHandler`。
-- maps / quick_add / saves / obstacles / robots / calibration 改存到 iOS Application Support。
-- `.rpo` / `.rpr` 使用 iOS 文件選擇器匯入；匯出叫出 iOS 分享面板。
-- App Icon 已換成黑底白色 R 標誌。
-
-## 與電腦版的差異
-原版插件系統允許插件直接執行 Python Full Access。iOS 不適合照原版方式執行下載進 App 的任意 Python，因此目前 iOS 包保留主程式功能，但停用 Python 插件執行層。
+- Robot Planner HTML / CSS / JavaScript / SVG 核心：`RobotPlanner/index.html`
+- iOS App 外殼：`WKWebView`
+- Native Bridge：`RobotPlanner/RobotBridge.swift`
+- iOS Mod Runtime：`RobotPlanner/PluginRuntime.js`
+- 插件、地圖、存檔、校正、Robot、Obstacle：iOS Application Support
+- `.rpo` / `.rpr`：iOS 文件選擇器匯入與分享面板匯出
+- 插件 ZIP 壓縮／解壓使用 ZIPFoundation Swift Package
 
 ## 最低版本
-iOS 16.0，支援 iPhone / iPad。
+- iOS 16.0
+- iPhone / iPad
