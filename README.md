@@ -96,3 +96,7 @@ MyPlugin.zip
 ## 最低版本
 - iOS 16.0
 - iPhone / iPad
+
+
+## iPad touch drag update
+Object cards can now be dragged directly to the mat with touch. Horizontal swiping still scrolls the library, long-press keeps the management menu, and tap-then-tap placement remains as a fallback.
